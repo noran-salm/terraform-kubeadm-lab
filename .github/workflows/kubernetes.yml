@@ -29,11 +29,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+            sudo apt-get update
+            sudo apt-get install -y unzip
+
       # ---------------------------------------
       # 2. Install Terraform
       # ---------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+            terraform_wrapper: false
 
       # ---------------------------------------
       # 3. Check Runner Prerequisites
