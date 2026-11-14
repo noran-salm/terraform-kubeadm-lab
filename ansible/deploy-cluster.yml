@@ -40,10 +40,10 @@
       register: kubelet_config
 
     - name: Check API Server connectivity
-      wait_for:
+      ansible.builtin.wait_for:
         host: "{{ hostvars[groups['masters'][0]].ansible_host | default(groups['masters'][0]) }}"
         port: 6443
-        timeout: 60
+        timeout: 120
       when: not kubelet_config.stat.exists
 
     - name: Join Worker using kubeadm

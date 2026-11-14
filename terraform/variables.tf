@@ -4,11 +4,11 @@ variable "aws_region" {
   default     = "eu-west-3"
 }
 
-variable "aws_profile" {
-  description = "AWS CLI profile"
-  type        = string
-  default     = "ecr-lab"
-}
+# variable "aws_profile" {
+#   description = "AWS CLI profile"
+#   type        = string
+#   default     = "ecr-lab"
+# }
 
 variable "project_name" {
   type    = string
@@ -16,13 +16,13 @@ variable "project_name" {
 }
 
 variable "instance_type" {
-  type    = string
+  type = string
 }
 
 variable "key_name" {
   description = "Existing AWS EC2 Key Pair name"
   type        = string
-  default = "my-aws-key"  
+  default     = "my-aws-key"
 }
 
 variable "my_ip" {

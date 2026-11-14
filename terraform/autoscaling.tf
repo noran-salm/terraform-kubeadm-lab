@@ -8,7 +8,7 @@ resource "aws_launch_template" "app" {
     aws_security_group.app_sg.id
   ]
 
-    user_data = base64encode(<<-EOF
+  user_data = base64encode(<<-EOF
     #!/bin/bash
     apt-get update -y
     apt-get install -y apache2
@@ -16,7 +16,7 @@ resource "aws_launch_template" "app" {
     systemctl start apache2
     echo "Hello from Auto Scaling Instance" > /var/www/html/index.html
     EOF
-    )
+  )
 
   block_device_mappings {
     device_name = "/dev/xvda"
