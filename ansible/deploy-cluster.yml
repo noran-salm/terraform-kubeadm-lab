@@ -1,0 +1,85 @@
+---
+# PLAY 1: Install Calico on Master
+- name: Install Calico CNI
+  hosts: masters
+  become: true
+
+  tasks:
+    - name: Apply Calico v3.33 manifest
+      command: >
+        kubectl apply -f
+        https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/calico.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Wait for Calico DaemonSet
+      command: >
+        kubectl rollout status daemonset/calico-node
+        -n kube-system --timeout=240s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Generate kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: join_output
+
+    - name: Save join command
+      set_fact:
+        kubeadm_join_command: "{{ join_output.stdout }}"
+
+
+# PLAY 2: Join Worker
+- name: Join Worker to Kubernetes Cluster
+  hosts: workers
+  become: true
+
+  tasks:
+    - name: Check if Worker already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_config
+
+    - name: Check API Server connectivity
+      wait_for:
+        host: 10.0.2.161
+        port: 6443
+        timeout: 60
+      when: not kubelet_config.stat.exists
+
+    - name: Join Worker using kubeadm
+      command: "{{ hostvars[groups['masters'][0]].kubeadm_join_command }}"
+      when: not kubelet_config.stat.exists
+
+
+# PLAY 3: Verify Cluster
+- name: Verify Kubernetes Cluster
+  hosts: masters
+  become: true
+
+  tasks:
+    - name: Wait until all nodes are Ready
+      command: >
+        kubectl wait --for=condition=Ready
+        nodes --all --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Display cluster nodes
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: nodes_output
+
+    - name: Show final nodes
+      debug:
+        var: nodes_output.stdout
+
+    - name: Display all pods
+      command: kubectl get pods -A
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: pods_output
+
+    - name: Show pod status
+      debug:
+        var: pods_output.stdout

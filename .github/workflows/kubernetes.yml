@@ -1,0 +1,39 @@
+name: Kubernetes Automation
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'inventory.ini'
+      - '*.yml'
+      - '.github/workflows/**'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, x64, bastion]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Ansible
+        run: ansible --version
+
+      - name: Validate Inventory
+        run: ansible-inventory -i inventory.ini --list
+
+      - name: Test Playbook Syntax
+        run: |
+          ansible-playbook \
+            -i inventory.ini \
+            cluster.yml \
+            --syntax-check
+
+      - name: Execute Ansible Playbook
+        run: |
+          ansible-playbook \
+            -i inventory.ini \
+            cluster.yml
