@@ -2,6 +2,10 @@
 name: Full Infrastructure Automation
 
 on:
+  push:
+    branches:
+      - main
+
   workflow_dispatch:
 
 permissions:
