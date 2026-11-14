@@ -41,7 +41,7 @@
 
     - name: Check API Server connectivity
       wait_for:
-        host: 10.0.2.161
+        host: "{{ hostvars[groups['masters'][0]].ansible_host | default(groups['masters'][0]) }}"
         port: 6443
         timeout: 60
       when: not kubelet_config.stat.exists

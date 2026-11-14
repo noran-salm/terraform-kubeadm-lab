@@ -1,29 +1,184 @@
 
-name: Kubernetes Automation
+name: Full Infrastructure Automation
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - 'ansible/**'
-      - 'inventory.ini'
-      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-kubernetes-deployment
+  cancel-in-progress: false
 
 jobs:
-  validate:
+  deploy:
+    name: Terraform + Ansible + Kubernetes
     runs-on: [self-hosted, linux, x64, bastion]
+    timeout-minutes: 90
+
+    env:
+      AWS_REGION: eu-west-3
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
 
     steps:
+      # ---------------------------------------
+      # 1. Checkout
+      # ---------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Check Ansible
-        run: ansible --version
+      # ---------------------------------------
+      # 2. Install Terraform
+      # ---------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - name: Validate Inventory
-        run: ansible-inventory -i ansible/inventory.ini --list
+      # ---------------------------------------
+      # 3. Check Runner Prerequisites
+      # ---------------------------------------
+      - name: Check Runner Prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Test Playbook Syntax
-        run: ansible-playbook -i ansible/inventory.ini ansible/cluster.yml --syntax-check
+          terraform version
+          ansible-playbook --version
+
+          test -f "$HOME/.ssh/my-aws-key.pem"
+          chmod 600 "$HOME/.ssh/my-aws-key.pem"
+
+          RUNNER_PUBLIC_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\r\n')
+
+          echo "RUNNER_PUBLIC_IP=$RUNNER_PUBLIC_IP" >> "$GITHUB_ENV"
+
+      # ---------------------------------------
+      # 4. Configure AWS Credentials
+      # ---------------------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-3
+
+      # ---------------------------------------
+      # 5. Terraform Init and Validate
+      # ---------------------------------------
+      - name: Prepare Terraform State
+        run: |
+          install -d -m 700 /home/ubuntu/terraform-state
+
+      - name: Terraform Format
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      # ---------------------------------------
+      # 6. Terraform Apply
+      # ---------------------------------------
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -var="my_ip=${RUNNER_PUBLIC_IP}/32"
+
+      # ---------------------------------------
+      # 7. Wait for New Bastion
+      # ---------------------------------------
+      - name: Wait for Bastion SSH
+        working-directory: terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASTION_IP=$(terraform output -raw bastion_public_ip)
+
+          echo "New Bastion IP: $BASTION_IP"
+
+          CONNECTED=0
+
+          for attempt in $(seq 1 30); do
+            if ssh \
+              -o BatchMode=yes \
+              -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=no \
+              -i "$HOME/.ssh/my-aws-key.pem" \
+              "ubuntu@$BASTION_IP" true; then
+
+              CONNECTED=1
+              break
+            fi
+
+            echo "Waiting for Bastion... attempt $attempt"
+            sleep 10
+          done
+
+          test "$CONNECTED" = "1"
+
+      # ---------------------------------------
+      # 8. Validate Generated Inventory
+      # ---------------------------------------
+      - name: Validate Ansible Inventory
+        run: |
+          test -s ansible/inventory.ini
+
+          ansible-inventory \
+            -i ansible/inventory.ini \
+            --list
+
+      # ---------------------------------------
+      # 9. Wait for Kubernetes Nodes SSH
+      # ---------------------------------------
+      - name: Wait for EC2 Instances
+        run: |
+          ansible all \
+            -i ansible/inventory.ini \
+            -m ansible.builtin.wait_for_connection \
+            -a "timeout=600"
+
+      # ---------------------------------------
+      # 10. Prepare Nodes
+      # ---------------------------------------
+      - name: Prepare Kubernetes Nodes
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/prepare-k8s.yml
+
+      # ---------------------------------------
+      # 11. Initialize Control Plane
+      # ---------------------------------------
+      - name: Initialize Kubernetes Control Plane
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/cluster.yml
+
+      # ---------------------------------------
+      # 12. Install Calico and Join Worker
+      # ---------------------------------------
+      - name: Deploy Kubernetes Cluster
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/deploy-cluster.yml
+
+      # ---------------------------------------
+      # 13. Final Validation
+      # ---------------------------------------
+      - name: Validate Kubernetes Cluster
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/verify-cluster.yml
