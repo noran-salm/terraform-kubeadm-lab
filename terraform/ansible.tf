@@ -21,7 +21,18 @@
 #   })
 # }
 
+# Fetch running EC2 instances created by the Auto Scaling Group
+data "aws_instances" "asg_nodes" {
+  instance_tags = {
+    Name = "${var.project_name}-asg-instance"
+  }
 
+  instance_state_names = ["running"]
+
+  depends_on = [
+    aws_autoscaling_group.app_asg
+  ]
+}
 
 resource "local_file" "ansible_inventory" {
   filename = "${path.module}/../ansible/inventory.ini"
