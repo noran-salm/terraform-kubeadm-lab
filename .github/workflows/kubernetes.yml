@@ -1,18 +1,18 @@
+
 name: Kubernetes Automation
 
 on:
   workflow_dispatch:
-
   push:
     branches:
       - main
     paths:
+      - 'ansible/**'
       - 'inventory.ini'
-      - '*.yml'
       - '.github/workflows/**'
 
 jobs:
-  deploy:
+  validate:
     runs-on: [self-hosted, linux, x64, bastion]
 
     steps:
@@ -23,17 +23,7 @@ jobs:
         run: ansible --version
 
       - name: Validate Inventory
-        run: ansible-inventory -i inventory.ini --list
+        run: ansible-inventory -i ansible/inventory.ini --list
 
       - name: Test Playbook Syntax
-        run: |
-          ansible-playbook \
-            -i inventory.ini \
-            cluster.yml \
-            --syntax-check
-
-      - name: Execute Ansible Playbook
-        run: |
-          ansible-playbook \
-            -i inventory.ini \
-            cluster.yml
+        run: ansible-playbook -i ansible/inventory.ini ansible/cluster.yml --syntax-check
