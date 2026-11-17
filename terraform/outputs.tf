@@ -21,3 +21,13 @@ output "autoscaling_group_name" {
 output "ami_id" {
   value = data.aws_ami.ubuntu.id
 }
+
+output "ecr_repository_url" {
+  description = "ECR repository URL"
+  value       = aws_ecr_repository.library_app.repository_url
+}
+
+output "ecr_repository_arn" {
+  description = "ECR repository ARN"
+  value       = aws_ecr_repository.library_app.arn
+}
