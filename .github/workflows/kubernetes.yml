@@ -1,4 +1,3 @@
-
 name: Full Infrastructure Automation
 
 on:
@@ -9,7 +8,6 @@ on:
       - "terraform/**"
       - "ansible/**"
       - ".github/workflows/kubernetes.yml"
-
   workflow_dispatch:
 
 permissions:
@@ -21,12 +19,16 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  AWS_PAGER: ""
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/../.tf-plugin-cache
   ANSIBLE_HOST_KEY_CHECKING: "False"
   ANSIBLE_RETRY_FILES_ENABLED: "False"
   ANSIBLE_PIPELINING: "True"
   ANSIBLE_FORCE_COLOR: "True"
+  ANSIBLE_TIMEOUT: "30"
+  ANSIBLE_SSH_ARGS: "-o ControlMaster=auto -o ControlPersist=60s -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 
 jobs:
   deploy:
@@ -35,24 +37,46 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # --------------------------------------------------
-      # 1. Checkout Repository
-      # --------------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Setup Terraform
-      # --------------------------------------------------
+      # Runs BEFORE any aws call. Installs AWS CLI v2 (user-level, no sudo)
+      # if missing; persists on the self-hosted runner for later runs.
+      - name: Validate Runner Prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          for cmd in ansible ansible-playbook ansible-inventory ssh ssh-keygen curl unzip python3; do
+            command -v "$cmd" >/dev/null 2>&1 || {
+              echo "::error::Required command '$cmd' is not installed on the runner."
+              exit 1
+            }
+          done
+
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "AWS CLI not found. Installing AWS CLI v2..."
+            tmp="$(mktemp -d)"
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "$tmp/awscliv2.zip"
+            unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+            "$tmp/aws/install" --update -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin"
+            rm -rf "$tmp"
+          fi
+
+          aws --version
+          ansible-playbook --version | head -n 1
+
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.11.4
           terraform_wrapper: false
 
-      # --------------------------------------------------
-      # 3. Configure AWS Credentials
-      # --------------------------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -60,72 +84,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # --------------------------------------------------
-      # 4. Validate Runner Environment and SSH Key
-      # --------------------------------------------------
-      - name: Validate Runner Prerequisites and SSH Key
+      - name: Verify AWS Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+
+      - name: Prepare SSH Key and Runner IP
         shell: bash
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          echo "Checking required commands..."
-
-          for cmd in terraform ansible ansible-playbook ansible-inventory ssh curl unzip; do
-            if ! command -v "$cmd" >/dev/null 2>&1; then
-              echo "::error::Required command '$cmd' is not installed."
-              exit 1
-            fi
-          done
-
-          echo "All required commands are available."
-
-          echo "Terraform version:"
-          terraform version
-
-          echo "Ansible version:"
-          ansible-playbook --version
-
-          # Prepare SSH directory
           KEY_PATH="$HOME/.ssh/my-aws-key.pem"
-
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
-          # Use GitHub Secret if provided.
-          # Otherwise, use the existing local Runner key.
-          if [[ -n "${SSH_PRIVATE_KEY:-}" ]]; then
-            if [[ -f "$KEY_PATH" ]]; then
-              echo "::error::Both SSH_PRIVATE_KEY and a local SSH key exist. Choose one key source."
-              exit 1
+          # Local runner key wins if present; otherwise use the GitHub secret.
+          if [[ -s "$KEY_PATH" ]]; then
+            echo "Using existing local SSH key."
+            if [[ -n "${SSH_PRIVATE_KEY:-}" ]]; then
+              echo "::warning::SSH_PRIVATE_KEY secret ignored because a local key exists."
             fi
-
+          elif [[ -n "${SSH_PRIVATE_KEY:-}" ]]; then
             printf '%s\n' "$SSH_PRIVATE_KEY" > "$KEY_PATH"
             echo "SSH_KEY_CREATED_FROM_SECRET=true" >> "$GITHUB_ENV"
-          fi
-
-          if [[ ! -s "$KEY_PATH" ]]; then
-            echo "::error::SSH private key was not found."
+          else
+            echo "::error::No SSH key: set SSH_PRIVATE_KEY secret or place $KEY_PATH on the runner."
             exit 1
           fi
 
           chmod 600 "$KEY_PATH"
-
-          # Validate private key format
           ssh-keygen -y -f "$KEY_PATH" >/dev/null
-
           echo "SSH private key validated."
 
-          # Detect Runner public IP
-          echo "Detecting Runner public IP..."
-
-          RUNNER_PUBLIC_IP=$(
+          RUNNER_PUBLIC_IP="$(
             curl -4 -fsS --max-time 10 https://checkip.amazonaws.com ||
             curl -4 -fsS --max-time 10 https://ifconfig.me
-          )
-
-          RUNNER_PUBLIC_IP=$(printf '%s' "$RUNNER_PUBLIC_IP" | tr -d '\r\n')
+          )"
+          RUNNER_PUBLIC_IP="$(printf '%s' "$RUNNER_PUBLIC_IP" | tr -d '\r\n')"
 
           if [[ ! "$RUNNER_PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             echo "::error::Invalid Runner public IP: $RUNNER_PUBLIC_IP"
@@ -135,37 +133,15 @@ jobs:
           echo "Runner public IP: ${RUNNER_PUBLIC_IP}"
           echo "RUNNER_PUBLIC_IP=${RUNNER_PUBLIC_IP}/32" >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
-      # 5. Verify AWS Authentication
-      # --------------------------------------------------
-      - name: Verify AWS Identity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          aws sts get-caller-identity
-
-      # --------------------------------------------------
-      # 6. Terraform Format, Initialize and Validate
-      # --------------------------------------------------
       - name: Terraform Format and Validate
         working-directory: terraform
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Checking Terraform formatting..."
           terraform fmt -check -recursive
-
-          echo "Initializing S3 Terraform backend..."
           terraform init -reconfigure -input=false
-
-          echo "Validating Terraform configuration..."
           terraform validate
 
-      # --------------------------------------------------
-      # 7. Terraform Plan and Apply
-      # --------------------------------------------------
       - name: Terraform Plan and Apply
         working-directory: terraform
         timeout-minutes: 30
@@ -173,15 +149,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Generating Terraform plan..."
-
           terraform plan \
             -input=false \
             -lock-timeout=5m \
             -out=tfplan \
             -var="runner_ip=${RUNNER_PUBLIC_IP}"
-
-          echo "Applying Terraform infrastructure..."
 
           terraform apply \
             -input=false \
@@ -189,50 +161,33 @@ jobs:
             -auto-approve \
             tfplan
 
-          echo "Terraform deployment completed."
-
-      # --------------------------------------------------
-      # 8. Validate Generated Ansible Inventory
-      # --------------------------------------------------
       - name: Validate Ansible Inventory
         shell: bash
         run: |
           set -euo pipefail
 
           INVENTORY="ansible/inventory.ini"
+          INV_JSON="$RUNNER_TEMP/ansible-inventory.json"
 
           if [[ ! -s "$INVENTORY" ]]; then
             echo "::error::Ansible inventory is missing or empty."
             exit 1
           fi
 
-          echo "Generated Ansible inventory:"
-          cat "$INVENTORY"
+          ansible-inventory -i "$INVENTORY" --graph
+          ansible-inventory -i "$INVENTORY" --list > "$INV_JSON"
 
-          echo "Validating inventory syntax..."
+          INV_JSON="$INV_JSON" python3 - <<'PY'
+          import json, os
 
-          ansible-inventory \
-            -i "$INVENTORY" \
-            --graph
+          with open(os.environ["INV_JSON"]) as f:
+              inv = json.load(f)
 
-          echo "Checking expected host groups..."
-
-          ansible-inventory \
-            -i "$INVENTORY" \
-            --list > /tmp/ansible-inventory.json
-
-          python3 - <<'PY'
-          import json
-
-          with open("/tmp/ansible-inventory.json") as f:
-              inventory = json.load(f)
-
-          masters = inventory.get("masters", {}).get("hosts", [])
-          workers = inventory.get("workers", {}).get("hosts", [])
+          masters = inv.get("masters", {}).get("hosts", [])
+          workers = inv.get("workers", {}).get("hosts", [])
 
           if len(masters) != 1:
               raise SystemExit(f"Expected 1 master, found {len(masters)}")
-
           if len(workers) != 1:
               raise SystemExit(f"Expected 1 worker, found {len(workers)}")
 
@@ -240,87 +195,51 @@ jobs:
           print(f"Worker hosts: {workers}")
           PY
 
-      # --------------------------------------------------
-      # 9. Wait for Direct SSH Connections
-      # --------------------------------------------------
       - name: Wait for EC2 Connections
         timeout-minutes: 12
         shell: bash
         run: |
           set -euo pipefail
-
           ansible k8s_cluster \
             -i ansible/inventory.ini \
             -m ansible.builtin.wait_for_connection \
             -a "timeout=600" \
             --forks 10
 
-      # --------------------------------------------------
-      # 10. Prepare Kubernetes Nodes
-      # --------------------------------------------------
       - name: Prepare Kubernetes Nodes
         timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
+          ansible-playbook -i ansible/inventory.ini ansible/prepare-k8s.yml --forks 10
 
-          ansible-playbook \
-            -i ansible/inventory.ini \
-            ansible/prepare-k8s.yml \
-            --forks 10
-
-      # --------------------------------------------------
-      # 11. Initialize Kubernetes Control Plane
-      # --------------------------------------------------
       - name: Initialize Kubernetes Control Plane
         timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
+          ansible-playbook -i ansible/inventory.ini ansible/cluster.yml --forks 10
 
-          ansible-playbook \
-            -i ansible/inventory.ini \
-            ansible/cluster.yml \
-            --forks 10
-
-      # --------------------------------------------------
-      # 12. Deploy Cluster Components and Join Worker
-      # --------------------------------------------------
       - name: Deploy Kubernetes Cluster
         timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
+          ansible-playbook -i ansible/inventory.ini ansible/deploy-cluster.yml --forks 10
 
-          ansible-playbook \
-            -i ansible/inventory.ini \
-            ansible/deploy-cluster.yml \
-            --forks 10
-
-      # --------------------------------------------------
-      # 13. Verify Kubernetes Cluster
-      # --------------------------------------------------
       - name: Verify Kubernetes Cluster
         timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
+          ansible-playbook -i ansible/inventory.ini ansible/verify-cluster.yml --forks 10
 
-          ansible-playbook \
-            -i ansible/inventory.ini \
-            ansible/verify-cluster.yml \
-            --forks 10
-
-      # --------------------------------------------------
-      # 14. Final Infrastructure Summary
-      # --------------------------------------------------
       - name: Final Infrastructure Summary
         if: success()
         working-directory: terraform
         shell: bash
         run: |
           set -euo pipefail
-
           {
             echo "## Infrastructure Deployment Completed"
             echo ""
@@ -330,15 +249,12 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # --------------------------------------------------
-      # 15. Cleanup Temporary Artifacts
-      # --------------------------------------------------
       - name: Cleanup Temporary Artifacts
         if: always()
         shell: bash
         run: |
           rm -f terraform/tfplan
-          rm -f /tmp/ansible-inventory.json
+          rm -f "$RUNNER_TEMP/ansible-inventory.json"
 
           if [[ "${SSH_KEY_CREATED_FROM_SECRET:-false}" == "true" ]]; then
             rm -f "$HOME/.ssh/my-aws-key.pem"
