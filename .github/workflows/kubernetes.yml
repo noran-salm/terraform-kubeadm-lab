@@ -153,6 +153,7 @@ jobs:
             -input=false \
             -lock-timeout=5m \
             -out=tfplan \
+            -var="my_ip=156.210.50.116/32" \
             -var="runner_ip=${RUNNER_PUBLIC_IP}"
 
           terraform apply \
