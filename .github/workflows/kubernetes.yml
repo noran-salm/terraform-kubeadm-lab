@@ -22,7 +22,7 @@ concurrency:
 jobs:
   deploy:
     name: Provision AWS and Deploy Kubernetes
-    runs-on: [self-hosted, linux, x64, bastion]
+    runs-on: self-hosted
     timeout-minutes: 90
 
     env:
@@ -48,7 +48,7 @@ jobs:
         with:
           terraform_version: 1.11.4
           terraform_wrapper: false
-          
+
       # --------------------------------------------------
       # 3. Check Runner Prerequisites
       # --------------------------------------------------
