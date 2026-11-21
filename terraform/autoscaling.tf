@@ -45,9 +45,11 @@ resource "aws_launch_template" "app" {
 resource "aws_autoscaling_group" "app_asg" {
   name = "${var.project_name}-asg"
 
-  min_size         = 1
+  min_size         = 2
   max_size         = 3
   desired_capacity = 2
+
+  wait_for_capacity_timeout = "10m"
 
   vpc_zone_identifier = [
     aws_subnet.public[0].id,

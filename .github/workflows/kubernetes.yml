@@ -5,6 +5,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "terraform/**"
+      - "ansible/**"
+      - ".github/workflows/kubernetes.yml"
 
   workflow_dispatch:
 
@@ -17,47 +21,78 @@ concurrency:
 
 jobs:
   deploy:
-    name: Terraform + Ansible + Kubernetes
+    name: Provision AWS and Deploy Kubernetes
     runs-on: [self-hosted, linux, x64, bastion]
     timeout-minutes: 90
 
     env:
-      AWS_REGION: eu-west-3
+      AWS_REGION: us-east-1
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+      ANSIBLE_RETRY_FILES_ENABLED: "False"
+      ANSIBLE_PIPELINING: "True"
 
     steps:
+      # --------------------------------------------------
       # 1. Checkout
+      # --------------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup Terraform
+      # --------------------------------------------------
+      # 2. Install Terraform
+      # --------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
+          terraform_version: 1.11.4
           terraform_wrapper: false
-
-      # 3. Check prerequisites
+          
+      # --------------------------------------------------
+      # 3. Check Runner Prerequisites
+      # --------------------------------------------------
       - name: Check Runner Prerequisites
         shell: bash
         run: |
           set -euo pipefail
 
-          command -v terraform
-          command -v ansible-playbook
-          command -v ssh
-          command -v unzip
+          echo "Checking required commands..."
 
+          for cmd in terraform ansible-playbook ansible ssh curl unzip; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              echo "ERROR: $cmd is not installed on the runner."
+              exit 1
+            fi
+          done
+
+          echo "Terraform version:"
           terraform version
+
+          echo "Ansible version:"
           ansible-playbook --version
+
+          echo "Checking SSH private key..."
 
           test -f "$HOME/.ssh/my-aws-key.pem"
           chmod 600 "$HOME/.ssh/my-aws-key.pem"
 
-          RUNNER_PUBLIC_IP=$(curl -fsS https://checkip.amazonaws.com)
+          echo "Checking Runner public IP..."
+
+          RUNNER_PUBLIC_IP=$(curl -4 -fsS https://checkip.amazonaws.com | tr -d '\r\n')
+
+          if [[ -z "$RUNNER_PUBLIC_IP" ]]; then
+            echo "ERROR: Could not detect Runner public IP."
+            exit 1
+          fi
+
+          echo "Runner public IP: ${RUNNER_PUBLIC_IP}"
+
           echo "RUNNER_PUBLIC_IP=${RUNNER_PUBLIC_IP}/32" >> "$GITHUB_ENV"
 
-      # 4. AWS credentials
+      # --------------------------------------------------
+      # 4. AWS Credentials
+      # --------------------------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -65,111 +100,151 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 5. Terraform checks
-    #   - name: Terraform Format
-    #     working-directory: terraform
-    #     run: terraform fmt -check -recursive
+      # # --------------------------------------------------
+      # # 5. Prepare Terraform State Directory
+      # # --------------------------------------------------
+      # - name: Prepare Terraform State Directory
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
 
+      #     mkdir -p /home/ubuntu/terraform-state
+      #     chmod 700 /home/ubuntu/terraform-state
+
+      #     echo "Terraform state directory is ready."
+
+      # --------------------------------------------------
+      # 6. Terraform Format
+      # --------------------------------------------------
+      - name: Terraform Format
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      # --------------------------------------------------
+      # 7. Terraform Init
+      # --------------------------------------------------
       - name: Terraform Init
         working-directory: terraform
-        run: terraform init -input=false
+        run: terraform init -reconfigure -input=false
 
+      # --------------------------------------------------
+      # 8. Terraform Validate
+      # --------------------------------------------------
       - name: Terraform Validate
         working-directory: terraform
         run: terraform validate
 
-      # 6. Terraform Plan
+      # --------------------------------------------------
+      # 9. Terraform Plan
+      # --------------------------------------------------
       - name: Terraform Plan
-        working-directory: terraform
-        run: |
-          terraform plan \
-            -input=false \
-            -out=tfplan \
-            -var="my_ip=${RUNNER_PUBLIC_IP}"
-
-      # 7. Terraform Apply
-      - name: Terraform Apply
-        working-directory: terraform
-        run: terraform apply -input=false -auto-approve tfplan
-
-      # 8. Verify Bastion
-      - name: Wait for Bastion SSH
         working-directory: terraform
         shell: bash
         run: |
           set -euo pipefail
 
-          BASTION_IP=$(terraform output -raw bastion_public_ip)
+          terraform plan \
+            -input=false \
+            -lock-timeout=5m \
+            -out=tfplan \
+            -var="runner_ip=${RUNNER_PUBLIC_IP}"
 
-          for attempt in $(seq 1 30); do
-            if ssh \
-              -o BatchMode=yes \
-              -o ConnectTimeout=5 \
-              -o StrictHostKeyChecking=no \
-              -i "$HOME/.ssh/my-aws-key.pem" \
-              "ubuntu@$BASTION_IP" true; then
-              echo "Bastion SSH is ready."
-              exit 0
-            fi
+      # --------------------------------------------------
+      # 10. Terraform Apply
+      # --------------------------------------------------
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            -auto-approve \
+            tfplan
 
-            echo "Waiting for Bastion: $attempt/30"
-            sleep 10
-          done
-
-          echo "Bastion SSH connection failed."
-          exit 1
-
-      # 9. Validate inventory
+      # --------------------------------------------------
+      # 11. Validate Generated Ansible Inventory
+      # --------------------------------------------------
       - name: Validate Ansible Inventory
+        shell: bash
         run: |
           set -euo pipefail
 
-          test -s ansible/inventory.ini
+          INVENTORY="ansible/inventory.ini"
+
+          if [[ ! -s "$INVENTORY" ]]; then
+            echo "ERROR: Ansible inventory was not generated."
+            exit 1
+          fi
+
+          echo "Generated inventory:"
+          cat "$INVENTORY"
+
+          echo "Validating inventory syntax..."
 
           ansible-inventory \
-            -i ansible/inventory.ini \
+            -i "$INVENTORY" \
             --graph
 
-      # 10. Wait for EC2 nodes
+      # --------------------------------------------------
+      # 12. Wait for Direct SSH Connections
+      # --------------------------------------------------
       - name: Wait for EC2 Connections
         run: |
           ansible k8s_cluster \
             -i ansible/inventory.ini \
             -m ansible.builtin.wait_for_connection \
-            -a "timeout=600"
+            -a "timeout=600" \
+            --forks 10
 
-      # 11. Prepare Kubernetes
+      # --------------------------------------------------
+      # 13. Prepare Kubernetes Nodes
+      # --------------------------------------------------
       - name: Prepare Kubernetes Nodes
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/prepare-k8s.yml
+            ansible/prepare-k8s.yml \
+            --forks 10
 
-      # 12. Initialize Control Plane
+      # --------------------------------------------------
+      # 14. Initialize Kubernetes Control Plane
+      # --------------------------------------------------
       - name: Initialize Kubernetes Control Plane
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/cluster.yml
+            ansible/cluster.yml \
+            --forks 10
 
-      # 13. Deploy Calico and Join Worker
+      # --------------------------------------------------
+      # 15. Deploy Kubernetes Cluster
+      # --------------------------------------------------
       - name: Deploy Kubernetes Cluster
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/deploy-cluster.yml
+            ansible/deploy-cluster.yml \
+            --forks 10
 
-      # 14. Final validation
-      - name: Validate Kubernetes Cluster
+      # --------------------------------------------------
+      # 16. Verify Kubernetes Cluster
+      # --------------------------------------------------
+      - name: Verify Kubernetes Cluster
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/verify-cluster.yml
+            ansible/verify-cluster.yml \
+            --forks 10
 
-      # 15. Display result
+      # --------------------------------------------------
+      # 17. Final Infrastructure Summary
+      # --------------------------------------------------
       - name: Final Infrastructure Summary
         if: success()
         working-directory: terraform
         run: |
-          echo "Infrastructure deployment completed."
+          echo "======================================"
+          echo "Infrastructure deployment completed"
+          echo "======================================"
+
           terraform output

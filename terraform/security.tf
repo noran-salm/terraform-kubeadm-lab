@@ -29,14 +29,13 @@ resource "aws_security_group" "app_sg" {
   vpc_id      = aws_vpc.main.id
 
   # 1. Admin SSH via Bastion
-  ingress {
-    description     = "SSH from Bastion"
-    from_port       = 22
-    to_port         = 22
-    protocol        = "tcp"
-    security_groups = [aws_security_group.bastion_sg.id]
-  }
-
+ ingress {
+  description = "SSH from GitHub Actions Runner"
+  from_port   = 22
+  to_port     = 22
+  protocol    = "tcp"
+  cidr_blocks = [var.runner_ip]
+}
   # 2. Kubeadm Core Ports (Self-referencing between cluster nodes)
   ingress {
     description = "Kubernetes API Server"

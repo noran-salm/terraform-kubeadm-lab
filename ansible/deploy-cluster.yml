@@ -1,30 +1,50 @@
+
 ---
 # PLAY 1: Install Calico on Master
 - name: Install Calico CNI
   hosts: masters
   become: true
+  gather_facts: true
 
   tasks:
     - name: Apply Calico v3.33 manifest
-      command: >
-        kubectl apply -f
-        https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/calico.yaml
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/calico.yaml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_apply
+      changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
 
     - name: Wait for Calico DaemonSet
-      command: >
-        kubectl rollout status daemonset/calico-node
-        -n kube-system --timeout=240s
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/calico-node
+          - -n
+          - kube-system
+          - --timeout=300s
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
+      changed_when: false
 
     - name: Generate kubeadm join command
-      command: kubeadm token create --print-join-command
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - token
+          - create
+          - --print-join-command
       register: join_output
+      changed_when: false
 
     - name: Save join command
-      set_fact:
+      ansible.builtin.set_fact:
         kubeadm_join_command: "{{ join_output.stdout }}"
 
 
@@ -32,22 +52,26 @@
 - name: Join Worker to Kubernetes Cluster
   hosts: workers
   become: true
+  gather_facts: true
 
   tasks:
     - name: Check if Worker already joined
-      stat:
+      ansible.builtin.stat:
         path: /etc/kubernetes/kubelet.conf
       register: kubelet_config
 
-    - name: Check API Server connectivity
+    - name: Check API Server connectivity using Controller private IP
       ansible.builtin.wait_for:
-        host: "{{ hostvars[groups['masters'][0]].ansible_host | default(groups['masters'][0]) }}"
+        host: "{{ hostvars[groups['masters'][0]].ansible_default_ipv4.address }}"
         port: 6443
-        timeout: 120
+        state: started
+        timeout: 180
+        connect_timeout: 5
       when: not kubelet_config.stat.exists
 
     - name: Join Worker using kubeadm
-      command: "{{ hostvars[groups['masters'][0]].kubeadm_join_command }}"
+      ansible.builtin.command:
+        cmd: "{{ hostvars[groups['masters'][0]].kubeadm_join_command }}"
       when: not kubelet_config.stat.exists
 
 
@@ -55,31 +79,51 @@
 - name: Verify Kubernetes Cluster
   hosts: masters
   become: true
+  gather_facts: false
 
   tasks:
     - name: Wait until all nodes are Ready
-      command: >
-        kubectl wait --for=condition=Ready
-        nodes --all --timeout=300s
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - nodes
+          - --all
+          - --timeout=300s
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
+      changed_when: false
 
     - name: Display cluster nodes
-      command: kubectl get nodes -o wide
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - wide
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: nodes_output
+      changed_when: false
 
     - name: Show final nodes
-      debug:
-        var: nodes_output.stdout
+      ansible.builtin.debug:
+        var: nodes_output.stdout_lines
 
     - name: Display all pods
-      command: kubectl get pods -A
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - -A
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: pods_output
+      changed_when: false
 
     - name: Show pod status
-      debug:
-        var: pods_output.stdout
+      ansible.builtin.debug:
+        var: pods_output.stdout_lines

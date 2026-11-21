@@ -1,7 +1,7 @@
 variable "aws_region" {
   description = "AWS region"
   type        = string
-  default     = "eu-west-3"
+  default     = "us-east-1"
 }
 
 variable "project_name" {
@@ -23,5 +23,9 @@ variable "key_name" {
 
 variable "my_ip" {
   description = "my public IP address"
+  type        = string
+}
+variable "runner_ip" {
+  description = "GitHub Actions Runner public IP"
   type        = string
 }
