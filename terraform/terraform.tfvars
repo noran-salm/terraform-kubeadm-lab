@@ -1,0 +1,5 @@
+aws_region    = "us-east-1"
+project_name  = "my-infrastructure"
+instance_type = "c7i-flex.large"
+my_ip         = "156.210.50.116/32"
+key_name      = "my-aws-key"
