@@ -152,8 +152,8 @@ jobs:
           terraform plan \
             -input=false \
             -lock-timeout=5m \
+            -replace="local_file.ansible_inventory" \
             -out=tfplan \
-            -var="my_ip=156.210.50.116/32" \
             -var="runner_ip=${RUNNER_PUBLIC_IP}"
 
           terraform apply \
@@ -162,39 +162,43 @@ jobs:
             -auto-approve \
             tfplan
 
+
+      - name: Test Ansible Connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Testing SSH connectivity to Kubernetes nodes..."
+
+          ansible k8s_cluster \
+            -i ansible/inventory.ini \
+            -m ansible.builtin.ping \
+            --forks 10
+
+          echo "All Kubernetes nodes are reachable."
+
+
+
       - name: Validate Ansible Inventory
         shell: bash
         run: |
           set -euo pipefail
 
-          INVENTORY="ansible/inventory.ini"
-          INV_JSON="$RUNNER_TEMP/ansible-inventory.json"
+          test -s ansible/inventory.ini
 
-          if [[ ! -s "$INVENTORY" ]]; then
-            echo "::error::Ansible inventory is missing or empty."
+          ansible-inventory \
+            -i ansible/inventory.ini \
+            --graph
+
+          MASTER_COUNT=$(ansible masters -i ansible/inventory.ini --list-hosts | tail -n 1 | xargs)
+          WORKER_COUNT=$(ansible workers -i ansible/inventory.ini --list-hosts | tail -n 1 | xargs)
+
+          if [[ "$MASTER_COUNT" != "1" || "$WORKER_COUNT" != "1" ]]; then
+            echo "Expected exactly one master and one worker."
             exit 1
           fi
 
-          ansible-inventory -i "$INVENTORY" --graph
-          ansible-inventory -i "$INVENTORY" --list > "$INV_JSON"
-
-          INV_JSON="$INV_JSON" python3 - <<'PY'
-          import json, os
-
-          with open(os.environ["INV_JSON"]) as f:
-              inv = json.load(f)
-
-          masters = inv.get("masters", {}).get("hosts", [])
-          workers = inv.get("workers", {}).get("hosts", [])
-
-          if len(masters) != 1:
-              raise SystemExit(f"Expected 1 master, found {len(masters)}")
-          if len(workers) != 1:
-              raise SystemExit(f"Expected 1 worker, found {len(workers)}")
-
-          print(f"Master hosts: {masters}")
-          print(f"Worker hosts: {workers}")
-          PY
+          echo "Inventory validation passed."
 
       - name: Wait for EC2 Connections
         timeout-minutes: 12
