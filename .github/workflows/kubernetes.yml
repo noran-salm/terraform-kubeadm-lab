@@ -152,6 +152,7 @@ jobs:
           terraform plan \
             -input=false \
             -lock-timeout=5m \
+            -var-file=terraform.tfvars \
             -replace="local_file.ansible_inventory" \
             -out=tfplan \
             -var="runner_ip=${RUNNER_PUBLIC_IP}"
